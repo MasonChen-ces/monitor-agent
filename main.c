@@ -1,13 +1,8 @@
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <stdlib.h>
-#include <sys/ioctl.h>
-#include <sys/socket.h>
-#include <sys/time.h>
-#include <sys/stat.h>
 #include <netinet/in.h>
 #include <errno.h>
 #include <unistd.h>
@@ -15,6 +10,13 @@
 #include <arpa/inet.h>
 #include <signal.h>
 #include <pthread.h>
+
+#include <sys/ioctl.h>
+#include <sys/socket.h>
+#include <sys/time.h>
+#include <sys/stat.h>
+#include <sys/ipc.h>
+#include <sys/shm.h>
 
 #include "log.h"
 #include "business.h"
@@ -40,9 +42,9 @@
         exit(EXIT_FAILURE); \
     } while (0)
 
+/*处理停止服务的共享内存与信号量*/
+int shmid = 0;
 
-
-pthread_mutex_t filelock =PTHREAD_MUTEX_INITIALIZER;
 int listenfd = 0;
 char socketFile[1024];
 void signal_handler(int sig)
@@ -51,20 +53,28 @@ void signal_handler(int sig)
     int brk = 1;
     if (sig == SIGABRT || sig == SIGKILL || sig == SIGTERM)
     {
-        fd = open(socketFile, O_WRONLY | O_CREAT | O_SYNC, 0644);
-        lseek(fd, 0, SEEK_SET);
-        if (pthread_mutex_lock(&filelock) == 0)
-        {
-            write(fd, &brk, sizeof(int));
-            printf("pid:%d writing socket file.\n",getpid());
-            fsync(fd);
-            pthread_mutex_unlock(&filelock);
-        }
-        close(fd);
+        int *p;
+        int isbreak = 1;
+
         if (listenfd > 0)
             close(listenfd);
         printf("user abort the service.\n");
 
+        p = shmat(shmid, NULL, 0);
+        memcpy(p, &isbreak, sizeof(int));
+        shmdt(p);
+        sleep(2);
+        struct shmid_ds ds;
+        while (1)
+        {
+            shmctl(shmid, IPC_STAT, &ds);
+            if (ds.shm_nattch == (unsigned short)0)
+            {
+                shmctl(shmid, IPC_RMID, NULL);
+                break;
+            }
+            usleep(100);
+        }
         exit(EXIT_SUCCESS);
     }
 }
@@ -164,19 +174,27 @@ int main(int argc, char *argv[])
     debug("current path:%s\n", cwd);
 
     char *tmpdir = calloc(1, 1024);
-    // snprintf(tmpdir, 1024, "%s/tmp", cwd);
     snprintf(socketFile, 1024, "%s/.socket", cwd);
-    fd = open(socketFile, O_WRONLY | O_CREAT, 0644);
-    if (fd < 0)
-        ERR_EXIT("open socket file.");
-    int brk = 0;
-    ret = write(fd, &brk, sizeof(int));
-    if (ret != sizeof(int))
+
+    /*创建共享内存*/
+    key_t key = ftok(socketFile, 100);
+    if (key < 0)
+        ERR_EXIT("ftok");
+    shmid = shmget(key, sizeof(int), IPC_CREAT | 0644);
+    if (shmid < 0)
     {
-        // printf("%s ret=%s\n", socketFile, ret);
-        ERR_EXIT("write socket file.");
+        ERR_EXIT("shmget");
     }
-    close(fd);
+    int *p;
+    p = shmat(shmid, NULL, 0);
+    if (p < 0)
+        ERR_EXIT("shmat");
+    int isBreak = 0;
+    if (memcpy(p, &isBreak, sizeof(int)) < 0)
+        ERR_EXIT("memcpy");
+    info("shmid:%d shmat:%d %p\n", shmid, *p, p);
+    shmdt(p);
+
     if (access(tmpdir, F_OK) < 0)
     {
         mkdir(tmpdir, 0744);
@@ -234,12 +252,11 @@ int main(int argc, char *argv[])
         {
             close(listenfd);
             SIG_ACTION;
-            do_service(conn, inet_ntoa(peeraddr.sin_addr), ntohs(peeraddr.sin_port), socketFile);
+            do_service(conn, inet_ntoa(peeraddr.sin_addr), ntohs(peeraddr.sin_port), shmid);
             exit(EXIT_SUCCESS);
         }
         else
         {
-
             close(conn);
         }
         // printf("------------------------------\n");
