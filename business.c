@@ -11,6 +11,9 @@
 #include <fcntl.h>
 #include <signal.h>
 #include <pthread.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <sys/shm.h>
 
 #include "business.h"
 #include "log.h"
@@ -20,7 +23,7 @@
 
 static fpos_t pos;
 static int fd_stdout;
-extern pthread_mutex_t filelock;
+int shmid;
 /*判断连接是否正常的宏,mac和linux不同*/
 #ifdef MAC
 #define CONN_INFO(m)                                                                             \
@@ -49,25 +52,19 @@ extern pthread_mutex_t filelock;
     while (0)
 #endif
 
-int ifBreak(char *socketFile)
+int ifBreak(int shmid)
 {
-    int fd;
     int ret = 1;
-    size_t reslt;
-    fd = open(socketFile, O_RDONLY, 0644);
-    if (fd < 0)
+    int *p;
+    if ((p = shmat(shmid, 0, 0)) < 0)
     {
-        perror("open socketFile");
-        return 0;
+        perror("shmat");
+        ret = 1;
     }
-    lseek(fd, 0, SEEK_SET);
-    if (pthread_mutex_lock(&filelock) == 0)
+    else
     {
-
-        if (read(fd, &ret, sizeof(int)) <= 0)
-            ret = 0;
-        close(fd);
-        pthread_mutex_unlock(&filelock);
+        ret = *p;
+        shmdt(p);
     }
     return ret;
 }
@@ -215,15 +212,13 @@ char *execute(char *shell, char *output)
 }
 
 /*业务主函数，由子进程直接调用*/
-void do_service(int conn, char *addr, int port, char *socketFile)
+void do_service(int conn, char *addr, int port, int shmid)
 {
-    // printf("socketFile:%s\n", socketFile);
     if (!conn)
     {
         printf("connection invalid.\n");
         return;
     }
-
     MParser *mp = MParser_New();
     while (mp)
     {
@@ -284,7 +279,7 @@ void do_service(int conn, char *addr, int port, char *socketFile)
         /*判断tcp状态，如果不是TCP_ESTABLISHED,就跳出循环，关闭conn*/
         CONN_INFO(conn);
         usleep(1000);
-        if (ifBreak(socketFile))
+        if (ifBreak(shmid))
         {
             break;
         }
@@ -294,6 +289,7 @@ void do_service(int conn, char *addr, int port, char *socketFile)
         MParser_Del(mp);
     info("server socket closed.(%s:%d)\n", addr, port);
     close(conn);
+    fflush(NULL);
 
     return;
 }
