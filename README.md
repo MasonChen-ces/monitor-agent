@@ -34,4 +34,4 @@ make run
 
 ----
 ## 4. client
-java client协议，参数Client.java
+java client协议，参考Client.java
